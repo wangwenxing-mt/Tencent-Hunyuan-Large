@@ -150,8 +150,7 @@ def top1gating(logits: Tensor, random_routing_dropped_token: bool = False):
     ce = torch.mean(mask1.float(), dim=0)
     l_aux = torch.sum(me * ce) * num_experts
     mask1_rand = mask1
-
-    top_idx = torch.topk(mask1_rand, k=capacity, dim=0)[1]
+    top_idx = torch.topk(mask1_rand.float(), k=capacity, dim=0)[1]
 
     new_mask1 = mask1 * torch.zeros_like(mask1).scatter_(0, top_idx, 1)
     mask1 = new_mask1
@@ -994,7 +993,7 @@ class HunYuanSdpaAttention(HunYuanAttention):
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with
         # custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.
-        if query_states.device.type == "cuda" and attention_mask is not None:
+        if query_states.device.type == "musa" and attention_mask is not None:
             query_states = query_states.contiguous()
             key_states = key_states.contiguous()
             value_states = value_states.contiguous()
@@ -1238,7 +1237,6 @@ class HunYuanModel(HunYuanPreTrainedModel):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList(
             [HunYuanDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
@@ -1403,6 +1401,10 @@ class HunYuanModel(HunYuanPreTrainedModel):
             attentions=all_self_attns,
         )
 
+def custom_cross_entropy_1(logits, targets):
+    log_probs = F.log_softmax(logits, dim=1)  # 1. 计算对数概率
+    loss = F.nll_loss(log_probs, targets, reduction='mean')  # 2. 计算负对数似然损失
+    return loss
 
 class HunYuanForCausalLM(HunYuanPreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]
@@ -1508,12 +1510,12 @@ class HunYuanForCausalLM(HunYuanPreTrainedModel):
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             # Flatten the tokens
-            loss_fct = CrossEntropyLoss()
+            # loss_fct = CrossEntropyLoss()
             shift_logits = shift_logits.view(-1, self.config.vocab_size)
             shift_labels = shift_labels.view(-1)
             # Enable model parallelism
             shift_labels = shift_labels.to(shift_logits.device)
-            loss = loss_fct(shift_logits, shift_labels)
+            loss = custom_cross_entropy_1(shift_logits, shift_labels)
 
         if not return_dict:
             output = (logits,) + outputs[1:]

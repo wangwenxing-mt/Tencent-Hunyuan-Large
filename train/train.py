@@ -32,6 +32,7 @@
 # limitations under the License.
 
 
+import torch_musa
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -45,7 +46,7 @@ from typing import Optional, Dict
 
 import transformers
 from torch.utils.data import Dataset
-from transformers import Trainer, TrainerCallback
+from transformers import Trainer, TrainerCallback, AutoConfig
 from peft import LoraConfig, get_peft_model, PeftModel
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from transformers.modeling_utils import unwrap_model
@@ -243,10 +244,11 @@ class CustomSaveCallback(TrainerCallback):
             output_dir = os.path.join(args.output_dir, f"{PREFIX_CHECKPOINT_DIR}-{state.global_step}")
 
             # 拷贝tokenizer, 模型和配置文件
-            model_path = os.path.join(args.model_name_or_path, 'modeling_hunyuan.py')
-            config_path = os.path.join(args.model_name_or_path, 'configuration_hunyuan.py')
+            model_path = os.path.join('../models', 'modeling_hunyuan.py')
+            config_path = os.path.join('../models', 'configuration_hunyuan.py')
             shutil.copy(model_path, os.path.join(output_dir, 'modeling_hunyuan.py'))
             shutil.copy(config_path, os.path.join(output_dir, 'configuration_hunyuan.py'))
+            
             shutil.copy(
                 os.path.join(args.tokenizer_name_or_path, 'generation_config.json'), 
                 os.path.join(output_dir, 'generation_config.json')
@@ -331,7 +333,6 @@ def train():
         )
         with deepspeed.zero.Init(dtype=init_kwargs["torch_dtype"], config_dict_or_path=training_args.deepspeed):
             model = HunYuanForCausalLM(config)
-    
     if model_args.train_attention_params_only:
         for name, param in model.named_parameters():
             if 'self_attn' not in name:
@@ -348,23 +349,19 @@ def train():
             task_type="CAUSAL_LM",
         )
         model = get_peft_model(model, lora_config)
-    
     # 用 zero3 的时候不切分 MoE 参数
     if model_args.num_experts > 0 \
         and training_args.make_moe_param_leaf_module and \
             training_args.deepspeed_plugin.zero_stage == 3:
         from deepspeed.utils import set_z3_leaf_modules
         set_z3_leaf_modules(model, [HunYuanMoE])
-
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
     # Tell Trainer not to attempt DataParallel
     model.is_parallelizable = True
     model.model_parallel = True
-
     training_args.lr_scheduler_kwargs = {
         'min_lr': training_args.min_lr,
     }
-
     trainer = Trainer(
         model=model, 
         tokenizer=tokenizer, 
@@ -373,8 +370,8 @@ def train():
         **data_module
     )
     model.config.use_cache = False
-
     trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
+
 
 
 if __name__ == "__main__":
